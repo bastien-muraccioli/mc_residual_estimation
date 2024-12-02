@@ -19,11 +19,6 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
 
   jointNumber = ctl.robot(ctl.robots()[0].name()).refJointOrder().size();
 
-  if(!ctl.controller().datastore().has("ros_spin"))
-  {
-     ctl.controller().datastore().make<bool>("ros_spin", false);
-  }
-
   if(!robot.hasDevice<mc_rbdyn::ExternalTorqueSensor>("externalTorqueSensor"))
   {
     mc_rtc::log::error_and_throw<std::runtime_error>(
@@ -61,11 +56,8 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   {
     // Intializing ROS node
     nh_ = mc_rtc::ROSBridge::get_node_handle();
-    if(!ctl.controller().datastore().get<bool>("ros_spin"))
-    {
-      spinThread_ = std::thread(std::bind(&ExternalForcesEstimator::rosSpinner, this));
-      ctl.controller().datastore().assign("ros_spin", true);
-    }
+
+    spinThread_ = std::thread(std::bind(&ExternalForcesEstimator::rosSpinner, this));
 
     mc_rtc::log::info("[ExternalForcesEstimator][ROS] Subscribing to {}", force_sensor_topic_);
     
