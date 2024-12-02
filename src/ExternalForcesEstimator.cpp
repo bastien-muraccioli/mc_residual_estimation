@@ -264,10 +264,13 @@ void ExternalForcesEstimator::rosSpinner(void)
 {
   mc_rtc::log::info("[ExternalForcesEstimator][ROS Spinner] thread created for force sensor reading");
   #ifdef MC_RTC_ROS_IS_ROS2
-    rclcpp::Rate r(freq_);
-    while(rclcpp::ok())
-    {
-      rclcpp::spin_some(nh_);
+
+    rclcpp::executors::SingleThreadedExecutor executor;
+    executor.add_node(nh_);
+
+    rclcpp::WallRate r(freq_);
+    while(rclcpp::ok()){
+      executor.spin_node_once(nh_);
       r.sleep();
     }
   #else
