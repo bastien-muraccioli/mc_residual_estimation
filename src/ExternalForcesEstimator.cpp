@@ -55,7 +55,7 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   if(ros_force_sensor_)
   {
     // Intializing ROS node
-    nh_ = mc_rtc::ROSBridge::get_node_handle();
+    nh_ = rclcpp::Node::make_shared("ExternalForcesEstimator");
 
     spinThread_ = std::thread(std::bind(&ExternalForcesEstimator::rosSpinner, this));
 
