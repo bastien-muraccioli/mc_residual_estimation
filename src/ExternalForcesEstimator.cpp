@@ -2,6 +2,7 @@
 #include <mc_control/GlobalPluginMacros.h>
 #include <mc_control/mc_global_controller.h>
 #include <mc_rtc/logging.h>
+#include <RBDyn/MultiBodyConfig.h>
 #include <SpaceVecAlg/EigenTypedef.h>
 #include <SpaceVecAlg/EigenUtility.h>
 #include <SpaceVecAlg/SpaceVecAlg>
@@ -82,7 +83,8 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   residualSpeedGain = config("residual_speed_gain", 100.0);
   // config loaded
 
-  robotIsFloatingBase = (robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free);
+  // robotIsFloatingBase = (robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free);
+  robotIsFloatingBase = false;
 
   jac = rbd::Jacobian(robot.mb(), referenceFrame);
   coriolis = new rbd::Coriolis(robot.mb());
@@ -201,12 +203,15 @@ void ExternalForcesEstimator::computeForFixedBase(mc_control::MCGlobalController
   auto & rjo = realRobot.refJointOrder();
 
   Eigen::VectorXd qdot(dofNumber), tau(dofNumber);
-  rbd::paramToVector(realRobot.alpha(), qdot);
+  qdot = rbd::dofToVector(realRobot.mb(), realRobot.alpha());
+  // auto vel = realRobot.encoderVelocities();
+  // qdot= Eigen::VectorXd::Map(vel.data(), vel.size());
+  
   switch(tau_mes_src_)
   {
     case TorqueSourceType::CommandedTorque:
-      mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet"); // Need friction model to finalize
-      // rbd::paramToVector(robot.jointTorque(), tau);
+      // mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet"); // Need friction model to finalize
+      tau = rbd::dofToVector(realRobot.mb(), robot.jointTorque());
       break;
     case TorqueSourceType::CurrentMeasurement:
       mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet");
@@ -363,15 +368,15 @@ void ExternalForcesEstimator::computeForFloatingBase(mc_control::MCGlobalControl
   auto & rjo = realRobot.refJointOrder();
 
   Eigen::VectorXd qdot(dofNumber), tau(dofNumber), tau_joint(dofNumber - 6);
-  qdot = rbd::paramToVector(realRobot.mb(), realRobot.alpha());
-  mc_rtc::log::info("Alphas size = {}", qdot.size());
+  qdot = rbd::dofToVector(realRobot.mb(), realRobot.alpha());
+  // mc_rtc::log::info("Alphas size = {}", qdot.size());
   alphas = qdot;
   tau_joint.setZero();
 
   switch(tau_mes_src_)
   {
     case TorqueSourceType::CommandedTorque:
-      tau = rbd::paramToVector(realRobot.mb(), robot.jointTorque());
+      tau = rbd::dofToVector(realRobot.mb(), robot.jointTorque());
       tau_joint = tau.tail(dofNumber - 6);
       break;
     case TorqueSourceType::CurrentMeasurement:
@@ -382,7 +387,7 @@ void ExternalForcesEstimator::computeForFloatingBase(mc_control::MCGlobalControl
                   * robot.mb().joint(robot.mb().nrJoints() - 1).gearRatio();
       break;
     case TorqueSourceType::JointTorqueMeasurement:
-      mc_rtc::log::info("JointTorques size = {}", realRobot.jointTorques().size());
+      // mc_rtc::log::info("JointTorques size = {}", realRobot.jointTorques().size());
       tau_joint = Eigen::Map<const Eigen::VectorXd>(realRobot.jointTorques().data(), realRobot.jointTorques().size());
       break;
   }
@@ -560,8 +565,8 @@ void ExternalForcesEstimator::computeForFloatingBase(mc_control::MCGlobalControl
 
   if(isActive)
   {
-    extTorqueSensor->torques(externalTorques);
-    extTorqueSensor->equivalentAcc(externalAccelerations);
+    // extTorqueSensor->torques(externalTorques);
+    // extTorqueSensor->equivalentAcc(externalAccelerations);
     counter = 0;
   }
   else if(!onePluginIsActive)
