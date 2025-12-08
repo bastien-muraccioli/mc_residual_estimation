@@ -14,6 +14,8 @@
 #include <RBDyn/MultiBody.h>
 #include <RBDyn/MultiBodyConfig.h>
 #include <Eigen/src/Core/Matrix.h>
+#include <string>
+#include <vector>
 
 #include <mc_rbdyn/VirtualTorqueSensor.h>
 
@@ -53,6 +55,9 @@ struct ExternalForcesEstimator : public mc_control::GlobalPlugin
   void removeLog(mc_control::MCGlobalController & controller);
 
 private:
+  std::vector<int> activeJointIndices; // A vector of the same size as the number of joints, with 1 for
+                                      // estimated joints and 0 for non-estimated joints
+
   bool robotIsFloatingBase;
   int dofNumber;
   int counter;

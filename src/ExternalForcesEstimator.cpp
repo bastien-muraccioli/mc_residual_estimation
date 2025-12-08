@@ -33,6 +33,42 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   dt = ctl.timestep();
 
   dofNumber = realRobot.mb().nrDof();
+  std::vector<std::string> activeJointNames;
+  mc_rtc::log::info("[ExternalForcesEstimator][Init] dofNumber = {}", dofNumber);
+
+  std::vector<std::string> active_gripper_joints;
+  for(const auto & g : robot.grippers())
+  {
+    for(const auto & n : g.get().activeJoints()) { active_gripper_joints.push_back(n); }
+  }
+  auto isActiveGripperJoint = [&](const std::string & j)
+  { return std::find(active_gripper_joints.begin(), active_gripper_joints.end(), j) != active_gripper_joints.end(); };
+  for(const auto & j : robot.mb().joints())
+  {
+    if(j.dof() != 1 || j.isMimic() || isActiveGripperJoint(j.name())) {continue; }
+    mc_rtc::log::info("[ExternalForcesEstimator][Init] Estimated joint -> {}", j.name());
+    activeJointNames.push_back(j.name());
+  }
+
+  int pos = 0;
+  if(robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free)
+  {
+    pos = 6; // Skip the floating base joints
+  }
+  for(int jI = robot.mb().joint(0).type() == rbd::Joint::Free ? 1 : 0; jI < robot.mb().nrJoints(); ++jI)
+  {
+    auto jIdx = static_cast<size_t>(jI);
+    const auto & j = robot.mb().joint(jI);
+    if(j.dof() == 1) // prismatic or revolute
+    {
+      if(std::find(activeJointNames.begin(), activeJointNames.end(), j.name()) != activeJointNames.end())
+      {
+        mc_rtc::log::info("[ExternalForcesEstimator][Init] Joint pos {} name {}", pos, j.name());
+        activeJointIndices.push_back(pos);
+      }
+      pos++;
+    }
+  }
 
   if(!ctl.controller().datastore().has("extTorquePlugin"))
   {
@@ -334,7 +370,6 @@ void ExternalForcesEstimator::computeForFixedBase(mc_control::MCGlobalController
     {
       if(pluginName != "ResidualEstimator")
       {
-        // anotherPluginIsActive = true;
         if(verbose)
           mc_rtc::log::info(
               "[ExternalForcesEstimator] Another plugin is active: {}, the last plugin sets the external torques.",
@@ -346,12 +381,30 @@ void ExternalForcesEstimator::computeForFixedBase(mc_control::MCGlobalController
 
   if(isActive)
   {
+    if(externalTorques.size() != extTorqueSensor->torques().size())
+    {
+      mc_rtc::log::error_and_throw<std::runtime_error>(
+          "[ExternalForcesEstimator] Size mismatch between estimated external torques (size {}) and "
+          "VirtualTorqueSensor torques (size {})",
+          externalTorques.size(), extTorqueSensor->torques().size());
+    }
+
+    for(int i = 0; i < externalTorques.size(); i++)
+    {
+      int idx = i;
+      // If the joint is not estimated, set the external torque to zero
+      if(std::find(activeJointIndices.begin(), activeJointIndices.end(), idx) == activeJointIndices.end())
+      {
+        externalTorques[idx] = 0.0;
+      }
+    }
+
     extTorqueSensor->torques(externalTorques);
     counter = 0;
   }
   else if(!onePluginIsActive)
   {
-    Eigen::VectorXd zero = Eigen::VectorXd::Zero(dofNumber);
+    Eigen::VectorXd zero = Eigen::VectorXd::Zero(extTorqueSensor->torques().size());
     extTorqueSensor->torques(zero);
     if(counter == 1) mc_rtc::log::warning("External force feedback inactive");
   }
@@ -363,7 +416,6 @@ void ExternalForcesEstimator::computeForFloatingBase(mc_control::MCGlobalControl
 
   auto & robot = ctl.robot();
   auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
-  auto & realTvmRobot = realRobot.tvmRobot();
 
   auto & rjo = realRobot.refJointOrder();
 
