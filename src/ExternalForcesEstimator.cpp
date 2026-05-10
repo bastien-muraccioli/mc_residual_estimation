@@ -39,14 +39,6 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
     ctl.controller().datastore().make_initializer<std::vector<std::string>>("extTorquePlugin", "");
   }
 
-  if(!robot.hasDevice<mc_rbdyn::VirtualTorqueSensor>("ExtTorquesVirtSensor"))
-  {
-    mc_rtc::log::error_and_throw<std::runtime_error>("[ExternalForcesEstimator][Init] No \"VirtualTorqueSensor\" with "
-                                                     "the name \"ExtTorquesVirtSensor\" found in the "
-                                                     "robot module, please add one to the robot's RobotModule.");
-  }
-  extTorqueSensor = &robot.device<mc_rbdyn::VirtualTorqueSensor>("ExtTorquesVirtSensor");
-
   Eigen::VectorXd qdot(dofNumber);
   qdot = tvmRobot.alpha()->value();
 
@@ -346,13 +338,13 @@ void ExternalForcesEstimator::computeForFixedBase(mc_control::MCGlobalController
 
   if(isActive)
   {
-    extTorqueSensor->torques(externalTorques);
+    robot.setExternalTorques(externalTorques);
     counter = 0;
   }
   else if(!onePluginIsActive)
   {
     Eigen::VectorXd zero = Eigen::VectorXd::Zero(dofNumber);
-    extTorqueSensor->torques(zero);
+    robot.setExternalTorques(zero);
     if(counter == 1) mc_rtc::log::warning("External force feedback inactive");
   }
 }
@@ -565,14 +557,12 @@ void ExternalForcesEstimator::computeForFloatingBase(mc_control::MCGlobalControl
 
   if(isActive)
   {
-    // extTorqueSensor->torques(externalTorques);
-    // extTorqueSensor->equivalentAcc(externalAccelerations);
     counter = 0;
   }
   else if(!onePluginIsActive)
   {
     Eigen::VectorXd zero = Eigen::VectorXd::Zero(dofNumber);
-    extTorqueSensor->torques(zero);
+    robot.setExternalTorques(zero);
     if(counter == 1) mc_rtc::log::warning("External force feedback inactive");
   }
 }
