@@ -5,17 +5,6 @@
 #pragma once
 
 #include <mc_control/GlobalPlugin.h>
-#include <mc_rtc/log/FlatLog.h>
-
-#include <RBDyn/Coriolis.h>
-#include <RBDyn/FA.h>
-#include <RBDyn/FK.h>
-#include <RBDyn/FV.h>
-#include <RBDyn/MultiBody.h>
-#include <RBDyn/MultiBodyConfig.h>
-#include <Eigen/src/Core/Matrix.h>
-
-#include <mc_tvm/Robot.h>
 
 enum TorqueSourceType
 {
@@ -23,6 +12,12 @@ enum TorqueSourceType
   CurrentMeasurement,
   MotorTorqueMeasurement,
   JointTorqueMeasurement,
+};
+
+enum EstimationMethod
+{
+  MomentumObserver,
+  ForceSensorBased,
 };
 
 namespace mc_plugin
@@ -42,85 +37,29 @@ struct ExternalForcesEstimator : public mc_control::GlobalPlugin
 
   ~ExternalForcesEstimator() override;
 
-  void computeForFixedBase(mc_control::MCGlobalController & controller);
-  void computeForFloatingBase(mc_control::MCGlobalController & controller);
-  void computeForwardDynamic(mc_control::MCGlobalController & controller);
-  void computeCHatPc0Hat(mc_control::MCGlobalController & controller);
-  void addGui(mc_control::MCGlobalController & controller);
-  void addLog(mc_control::MCGlobalController & controller);
-  void removeLog(mc_control::MCGlobalController & controller);
+  
 
 private:
-  bool robotIsFloatingBase;
-  int dofNumber;
-  int counter;
-  double dt;
-  bool verbose;
-  bool isActive;
+  void loadConfig(const mc_rtc::Configuration & config);
+  void addGui(mc_control::MCGlobalController & controller);
+  void addLog(mc_control::MCGlobalController & controller);
 
-  double residualGains;
-  std::string referenceFrame;
+  // Return the external torque estimation based on a momentum observer
+  Eigen::VectorXd momentumObserver(mc_control::MCGlobalController & controller);
 
-  rbd::Jacobian jac;
-  rbd::Coriolis * coriolis;
-  rbd::ForwardDynamics forwardDynamics;
+  // Return the external torque estimation based on force sensors measurements, minus the torque from the contact constraint
+  // tau_{FT sensor} - J^T * F_{contact constraint}
+  Eigen::VectorXd forceSensorBasedEstimation(mc_control::MCGlobalController & controller);
 
-  Eigen::VectorXd pzero;
-
-  Eigen::VectorXd integralTermIntern;
-  Eigen::VectorXd internResidual;
-  Eigen::VectorXd integralTermExtern;
-  Eigen::VectorXd externResidual;
-  Eigen::VectorXd residualWithRotorInertia;
-  Eigen::VectorXd integralTermWithRotorInertia;
-
-  Eigen::VectorXd FTSensorTorques;
-  Eigen::VectorXd prevFTSensorTorques;
-  Eigen::VectorXd filteredFTSensorTorques;
-  Eigen::VectorXd newExternalTorques;
-  Eigen::VectorXd externalTorques;
-  Eigen::VectorXd filteredExternalTorques;
-  sva::ForceVecd externalForces;
-  sva::ForceVecd externalForcesResidual;
-  sva::ForceVecd newExternalForces;
-  sva::ForceVecd filteredFTSensorForces;
-  Eigen::Vector6d externalForcesFT;
-
-  // Used for collision avoidance observer, not for the control
-  Eigen::VectorXd residualSpeed;
-  Eigen::VectorXd integralTermSpeed;
-  double residualSpeedGain;
-
-  // Force sensor
-  bool use_force_sensor_;
+  bool isActive_;
+  double residualGain_;
+  Eigen::VectorXd pZero_; // Momentum at t0
   TorqueSourceType tau_mes_src_;
-
-  std::string ft_sensor_name_;
-
-  // Floating base residual computation
-  Eigen::VectorXd internalResidual;
-  Eigen::Vector6d externalResidual;
-  Eigen::MatrixXd prevH;
-  Eigen::MatrixXd prevF;
-  Eigen::MatrixXd prevI_c_0;
-  Eigen::MatrixXd mimicExclusion;
-
-  std::vector<sva::ForceVecd> EstimationAtFTSensors;
-
-  // Custom forward dynamic calculation
-  Eigen::MatrixXd H;
-  Eigen::MatrixXd F;
-  Eigen::MatrixXd Ic0;
-  Eigen::MatrixXd Hd;
-  Eigen::MatrixXd Fd;
-  Eigen::MatrixXd Ic0d;
-
-  Eigen::VectorXd c_hat;
-
-  Eigen::IOFormat format;
-
-  // Logging
-  Eigen::VectorXd alphas;
+  EstimationMethod estimation_method_;
+  Eigen::VectorXd tau_ext_hat_; // Estimated external torque
+  Eigen::VectorXd tau_momentum_observer_; // External torque estimation from the momentum observer
+  Eigen::VectorXd integralTerm_;
+  Eigen::VectorXd activeJoints_; // Mask for active joints in the estimation (1 for active, 0 for inactive)
 };
 
 } // namespace mc_plugin
