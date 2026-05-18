@@ -6,7 +6,7 @@
 
 #include <mc_control/GlobalPlugin.h>
 
-enum TorqueSourceType
+enum class TorqueSourceType
 {
   CommandedTorque,
   CurrentMeasurement,
@@ -14,7 +14,7 @@ enum TorqueSourceType
   JointTorqueMeasurement,
 };
 
-enum EstimationMethod
+enum class EstimationMethod
 {
   MomentumObserver,
   ForceSensorBased,
@@ -40,6 +40,26 @@ struct ExternalForcesEstimator : public mc_control::GlobalPlugin
   
 
 private:
+  static constexpr std::array<const char *, 4> torqueSourceNames =
+  {
+    "CommandedTorque",
+    "CurrentMeasurement",
+    "MotorTorqueMeasurement",
+    "JointTorqueMeasurement"
+  };
+
+  static constexpr std::array<const char *, 2> estimationMethodNames =
+  {
+    "MomentumObserver",
+    "ForceSensorBased"
+  };
+
+  static std::string toString(TorqueSourceType src);
+  static TorqueSourceType toTorqueSource(const std::string & s);
+
+  static std::string toString(EstimationMethod method);
+  static EstimationMethod toEstimationMethod(const std::string & s);
+
   void loadConfig(const mc_rtc::Configuration & config);
   void addGui(mc_control::MCGlobalController & controller);
   void addLog(mc_control::MCGlobalController & controller);
@@ -58,6 +78,9 @@ private:
   EstimationMethod estimation_method_;
   Eigen::VectorXd tau_ext_hat_; // Estimated external torque
   Eigen::VectorXd tau_momentum_observer_; // External torque estimation from the momentum observer
+  Eigen::VectorXd tau_ext_diff_; // Difference between the measured torque and the model-based torque (tau_mes - C*qdot - g)
+  Eigen::VectorXd tau_contact_; // Torque from the contact constraint
+  Eigen::VectorXd tau_ext_ft_sensor_; // External torque estimation from force sensors
   Eigen::VectorXd integralTerm_;
   Eigen::VectorXd activeJoints_; // Mask for active joints in the estimation (1 for active, 0 for inactive)
 };
