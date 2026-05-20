@@ -19,7 +19,7 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
   if(!ctl.controller().datastore().has("extTorquePlugin"))
   {
-    ctl.controller().datastore().make_initializer<std::vector<std::string>>("extTorquePlugin", "");
+    ctl.controller().datastore().make_initializer<std::vector<std::string>>("extTorquePlugin");
   }
 
   loadConfig(config);
@@ -117,29 +117,29 @@ void ExternalForcesEstimator::before(mc_control::MCGlobalController & controller
   std::vector<std::string> & extTorquePlugin =
       ctl.controller().datastore().get<std::vector<std::string>>("extTorquePlugin");
 
-  // if(isActive_)
-  // {
-  //   extTorquePlugin.push_back("ResidualEstimator");
-  // }
-  // else
-  // {
-  //   extTorquePlugin.erase(std::remove(extTorquePlugin.begin(), extTorquePlugin.end(), "ResidualEstimator"), extTorquePlugin.end());
-  // }
+  if(isActive_)
+  {
+    extTorquePlugin.push_back("ResidualEstimator");
+  }
+  else
+  {
+    extTorquePlugin.erase(std::remove(extTorquePlugin.begin(), extTorquePlugin.end(), "ResidualEstimator"), extTorquePlugin.end());
+  }
 
   bool onePluginIsActive = false;
-  // if(extTorquePlugin.size() > 0)
-  // {
-  //   onePluginIsActive = true;
-  //   for(const auto & pluginName : extTorquePlugin)
-  //   {
-  //     if(pluginName != "ResidualEstimator")
-  //     {
-  //         mc_rtc::log::info(
-  //             "[ExternalForcesEstimator] Another plugin is active: {}, the last plugin sets the external torques.", pluginName);
-  //       break;
-  //     }
-  //   }
-  // }
+  if(extTorquePlugin.size() > 0)
+  {
+    onePluginIsActive = true;
+    for(const auto & pluginName : extTorquePlugin)
+    {
+      if(pluginName != "ResidualEstimator")
+      {
+          mc_rtc::log::info(
+              "[ExternalForcesEstimator] Another plugin is active: {}, the last plugin sets the external torques.", pluginName);
+        break;
+      }
+    }
+  }
 
   if(isActive_)
   {
@@ -308,7 +308,7 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
 
   Eigen::MatrixXd C = coriolis.coriolis(realRobot.mb(), realRobot.mbc());
   Eigen::VectorXd Cqdot_plus_g = fd.C();
-  Eigen::VectorXd g = C*qdot - Cqdot_plus_g;
+  Eigen::VectorXd g = -(C*qdot - Cqdot_plus_g);
 
   
   tau_ext_diff_ = forceSensorBasedEstimation(ctl);

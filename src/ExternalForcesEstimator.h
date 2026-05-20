@@ -71,7 +71,7 @@ private:
   // tau_{FT sensor} - J^T * F_{contact constraint}
   Eigen::VectorXd forceSensorBasedEstimation(mc_control::MCGlobalController & controller);
 
-  bool isActive_;
+  bool isActive_ = false;
   double residualGain_;
   Eigen::VectorXd pZero_; // Momentum at t0
   TorqueSourceType tau_mes_src_;
