@@ -146,7 +146,7 @@ void ExternalForcesEstimator::before(mc_control::MCGlobalController & controller
     controller.controller().robot().setExternalTorques(tau_ext_hat_);
     controller.controller().realRobot().setExternalTorques(tau_ext_hat_);
   }
-  else   // else if(!onePluginIsActive)
+  else if(!onePluginIsActive)
   {
     controller.controller().robot().setExternalTorques(Eigen::VectorXd::Zero(real_robot.mb().nrDof()));
     controller.controller().realRobot().setExternalTorques(Eigen::VectorXd::Zero(ctl.robot().mb().nrDof()));
@@ -274,7 +274,7 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
   {
     case TorqueSourceType::CommandedTorque:
       // Need friction model to finalize
-      tau = rbd::sDofToVector(robot.mb(), robot.jointTorque());
+      tau = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
       break;
     case TorqueSourceType::CurrentMeasurement:
       mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet");
@@ -316,6 +316,7 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
   integralTerm_ += activeJoints_.cwiseProduct((tau + tau_ext_diff_ + tau_contact_ + C.transpose() * qdot - g + tau_momentum_observer_) * ctl.timestep());
 
   tau_momentum_observer_ = activeJoints_.cwiseProduct(residualGain_ * (pt - integralTerm_ + pZero_));
+  tau_momentum_observer_ += activeJoints_.cwiseProduct(tau_ext_diff_);
 
   return tau_momentum_observer_;
 }
