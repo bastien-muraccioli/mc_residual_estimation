@@ -72,6 +72,7 @@ private:
   Eigen::VectorXd forceSensorBasedEstimation(mc_control::MCGlobalController & controller);
 
   bool isActive_ = false;
+  bool useFTSensorMeasurements_ = true;
   double residualGain_;
   Eigen::VectorXd pZero_; // Momentum at t0
   TorqueSourceType tau_mes_src_;
