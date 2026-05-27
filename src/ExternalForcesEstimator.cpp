@@ -17,16 +17,31 @@ ExternalForcesEstimator::~ExternalForcesEstimator() = default;
 void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, const mc_rtc::Configuration & config)
 {
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
-  if(!ctl.controller().datastore().has("extTorquePlugin"))
+
+   if(ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
   {
-    ctl.controller().datastore().make_initializer<std::vector<std::string>>("extTorquePlugin");
+    mc_rtc::log::warning(
+    "[ExternalForcesEstimator] Contact-constraint torque compensation is only available with the TVM backend. " 
+    "The current backend will ignore torques induced by contact constraints, "
+    "which can lead to large errors in external force estimation when contacts are active.");
   }
+
+  auto & robot = ctl.robot(ctl.robots()[0].name());
+  nDof_ = robot.mb().nrDof();
 
   loadConfig(config);
 
+  if(useActiveJointsMask_)
+  {
+    initializeActiveJoints(robot);
+    activeJointsInitialized_ = true;
+  }
+  else
+  {
+    activeJoints_ = Eigen::VectorXd::Ones(nDof_);
+  }
+ 
   // Initialize the momentum observer
-  auto & robot = ctl.robot(ctl.robots()[0].name());
-  bool robotIsFloatingBase = (robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free);
   rbd::ForwardDynamics fd = rbd::ForwardDynamics(robot.mb());
   fd.computeC(robot.mb(), robot.mbc());
   fd.computeH(robot.mb(), robot.mbc());
@@ -38,49 +53,17 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
   }
   Eigen::VectorXd qdot = rbd::sDofToVector(robot.mb(), robot.mbc().alpha);
   pZero_ = M * qdot;
-  tau_ext_hat_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  tau_momentum_observer_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  tau_ext_diff_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  tau_contact_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  integralTerm_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
 
-  // Determine which joints are included in the estimation (floating base joints are included if the robot is floating base, and mimic joints are excluded)
-  activeJoints_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
-  int jointIndex = 0;
-  if(robotIsFloatingBase)
-  {
-    // First 6 DoFs are floating base, the external forces is estimated
-    activeJoints_.head(6).setOnes();
-    jointIndex = 6;
-  }
-  for(std::string joint : robot.refJointOrder())
-  {
-    int i = robot.jointIndexByName(joint);
-    if(robot.mb().joint(i).dof() != 1 || robot.mb().joint(i).isMimic())
-    {
-      mc_rtc::log::info("[ExternalForcesEstimator][Init] Joint {} is excluded from the estimation.", joint);
-    }
-    else
-    {
-      activeJoints_(jointIndex) = 1;
-      mc_rtc::log::info("[ExternalForcesEstimator][Init] Estimated joint -> {}", joint);
-      jointIndex++;
-    }
-  }
-
-  // Create datastore's entries to change modify parameters from code
-  ctl.controller().datastore().make_call("EF_Estimator::isActive", [this]() { return this->isActive_; });
-  ctl.controller().datastore().make_call("EF_Estimator::toggleActive", [this]() { this->isActive_ = !this->isActive_; });
-  ctl.controller().datastore().make_call("EF_Estimator::setGain",
-                                         [this](double gain)
-                                         {
-                                           this->tau_ext_hat_.setZero();
-                                           this->residualGain_ = gain;
-                                         });
+  tau_ext_hat_ = Eigen::VectorXd::Zero(nDof_);
+  tau_momentum_observer_ = Eigen::VectorXd::Zero(nDof_);
+  tau_ext_diff_ = Eigen::VectorXd::Zero(nDof_);
+  tau_contact_ = Eigen::VectorXd::Zero(nDof_);
+  tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(nDof_);
+  integralTerm_ = Eigen::VectorXd::Zero(nDof_);
 
   addGui(controller);
   addLog(controller);
+  addDatastoreCall(controller);
   mc_rtc::log::info("[ExternalForcesEstimator][Init] called with configuration:\n{}", config.dump(true, true));
 }
 
@@ -93,7 +76,6 @@ void ExternalForcesEstimator::before(mc_control::MCGlobalController & controller
 {
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
   auto & robot = ctl.robot();
-  auto & real_robot = ctl.realRobot(ctl.robots()[0].name());
 
   if(robot.encoderVelocities().empty())
   {
@@ -114,30 +96,28 @@ void ExternalForcesEstimator::before(mc_control::MCGlobalController & controller
     mc_rtc::log::error_and_throw<std::runtime_error>("[ExternalForcesEstimator] Invalid estimation method.");
   }
 
-  std::vector<std::string> & extTorquePlugin =
-      ctl.controller().datastore().get<std::vector<std::string>>("extTorquePlugin");
-
-  if(isActive_)
+  if(useActiveJointsMask_ && !activeJointsInitialized_)
   {
-    extTorquePlugin.push_back("ResidualEstimator");
+    initializeActiveJoints(robot);
+    activeJointsInitialized_ = true;
   }
-  else
+  else if(!useActiveJointsMask_ && activeJointsInitialized_)
   {
-    extTorquePlugin.erase(std::remove(extTorquePlugin.begin(), extTorquePlugin.end(), "ResidualEstimator"), extTorquePlugin.end());
+    activeJoints_ = Eigen::VectorXd::Ones(nDof_);
+    activeJointsInitialized_ = false;
   }
 
-  bool onePluginIsActive = false;
-  if(extTorquePlugin.size() > 0)
+  // Apply the active joint mask to the estimated external torque
+  tau_ext_hat_ = tau_ext_hat_.cwiseProduct(activeJoints_);
+
+  if(activeHasChanged_ != isActive_)
   {
-    onePluginIsActive = true;
-    for(const auto & pluginName : extTorquePlugin)
+    activeHasChanged_ = isActive_;
+    if(!isActive_)
     {
-      if(pluginName != "ResidualEstimator")
-      {
-          mc_rtc::log::info(
-              "[ExternalForcesEstimator] Another plugin is active: {}, the last plugin sets the external torques.", pluginName);
-        break;
-      }
+      mc_rtc::log::info("[ExternalForcesEstimator] Estimation feedback deactivated, external torques set to zero.");
+      controller.controller().robot().setExternalTorques(Eigen::VectorXd::Zero(nDof_));
+      controller.controller().realRobot().setExternalTorques(Eigen::VectorXd::Zero(nDof_));
     }
   }
 
@@ -145,11 +125,6 @@ void ExternalForcesEstimator::before(mc_control::MCGlobalController & controller
   {
     controller.controller().robot().setExternalTorques(tau_ext_hat_);
     controller.controller().realRobot().setExternalTorques(tau_ext_hat_);
-  }
-  else if(!onePluginIsActive)
-  {
-    controller.controller().robot().setExternalTorques(Eigen::VectorXd::Zero(real_robot.mb().nrDof()));
-    controller.controller().realRobot().setExternalTorques(Eigen::VectorXd::Zero(ctl.robot().mb().nrDof()));
   }
 }
 
@@ -169,9 +144,22 @@ mc_control::GlobalPlugin::GlobalPluginConfiguration ExternalForcesEstimator::con
 void ExternalForcesEstimator::loadConfig(const mc_rtc::Configuration & config)
 {
   // load config
-  residualGain_ = config("residual_gain", 0.0);
-  tau_mes_src_ = toTorqueSource(config("torque_source_type", std::string("")));
-  estimation_method_ = toEstimationMethod(config("estimation_method", std::string("")));
+  // residual_gain: 10 # Higher is better, but lead to more noise in the estimation (recommended values are between 10 and dt/2)
+  // torque_source_type: CommandedTorque # Options: JointTorqueMeasurement, CommandedTorque, EstimatedTorque
+  // estimation_method: ForceSensorBased # Options: MomentumObserver, ForceSensorBased (MomentumObserver includes the use of the FT sensors)
+  // use_active_joints_mask: false # If true, the mimic and grippers related joints will be masked out in the estimation
+  // use_forces_from_ft_sensors: true # If true, the forces from the FT sensors will be used in the estimation
+  residualGain_ = config("residual_gain", 10.0);
+  tau_mes_src_ = toTorqueSource(config("torque_source_type", std::string("CommandedTorque")));
+  estimation_method_ = toEstimationMethod(config("estimation_method", std::string("ForceSensorBased")));
+  useActiveJointsMask_ = config("use_active_joints_mask", false);
+  useFTSensorMeasurements_ = config("use_forces_from_ft_sensors", true);
+}
+
+void ExternalForcesEstimator::resetMomentumObserver()
+{
+  integralTerm_.setZero();
+  tau_momentum_observer_.setZero();
 }
 
 void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller)
@@ -193,15 +181,15 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
   ctl.controller().gui()->addElement({"Plugins", "External forces estimator"},
     mc_rtc::gui::Checkbox("Is estimation feedback active", isActive_),
     mc_rtc::gui::Checkbox("Use sensor measurements", useFTSensorMeasurements_),
+    mc_rtc::gui::Checkbox("Active Gripper & Mimic joints mask", useActiveJointsMask_),
     mc_rtc::gui::NumberInput(
       "Gain", 
-      [this]() { return this->residualGain_; },
+      [this]() { return residualGain_; },
       [this](double gain)
       {
         if(gain != residualGain_)
         {
-          tau_ext_hat_.setZero();
-          integralTerm_.setZero();
+          resetMomentumObserver();
         }
         residualGain_ = gain;
       }),
@@ -232,50 +220,70 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
       {
         tau_mes_src_ = toTorqueSource(v);
       }),
-    mc_rtc::gui::ArrayLabel("Torque Ext", ctl.robot().refJointOrder(), [this]() { return tau_ext_hat_; }),
-    mc_rtc::gui::ArrayLabel("Torque Ext from Momentum Observer", ctl.robot().refJointOrder(), [this]() { return tau_momentum_observer_; }),
-    mc_rtc::gui::ArrayLabel("Torque Ext from Force Sensors", ctl.robot().refJointOrder(), [this]() { return tau_ext_ft_sensor_; }),
-    mc_rtc::gui::ArrayLabel("Torque Ext from Contact Constraint", ctl.robot().refJointOrder(), [this]() { return tau_contact_; })
+    mc_rtc::gui::ArrayLabel("Torque Ext Estimated", jointNames, [this]() { return tau_ext_hat_; }),
+    mc_rtc::gui::ArrayLabel("Torque Ext from Momentum Observer", jointNames, [this]() { return tau_momentum_observer_; }),
+    mc_rtc::gui::ArrayLabel("Torque Ext from Force Sensors", jointNames, [this]() { return tau_ext_ft_sensor_; }),
+    mc_rtc::gui::ArrayLabel("Torque Ext from Contact Constraint", jointNames, [this]() { return tau_contact_; })
   );
 }
 
 void ExternalForcesEstimator::addLog(mc_control::MCGlobalController & controller)
 {
   controller.controller().logger().addLogEntry("ExternalForceEstimator_gain",
-                                               [&, this]() { return this->residualGain_; });
+                                               [&, this]() { return residualGain_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauExtHat",
-                                               [&, this]() { return this->tau_ext_hat_; });
+                                               [&, this]() { return tau_ext_hat_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_isActive",
-                                               [&, this]() { return this->isActive_; });
+                                               [&, this]() { return isActive_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_integralTerm",
-                                               [&, this]() { return this->integralTerm_; });
+                                               [&, this]() { return integralTerm_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_activeJoints",
-                                               [&, this]() { return this->activeJoints_; });
+                                               [&, this]() { return activeJoints_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauMomentumObserver",
-                                               [&, this]() { return this->tau_momentum_observer_; });
+                                               [&, this]() { return tau_momentum_observer_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauExtDiff",
-                                               [&, this]() { return this->tau_ext_diff_; });
+                                               [&, this]() { return tau_ext_diff_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauContact",
-                                               [&, this]() { return this->tau_contact_; });
+                                               [&, this]() { return tau_contact_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauExtFtSensor",
-                                               [&, this]() { return this->tau_ext_ft_sensor_; });
+                                               [&, this]() { return tau_ext_ft_sensor_; });
+  controller.controller().logger().addLogEntry("ExternalForceEstimator_useFTSensorMeasurements",
+                                               [&, this]() { return useFTSensorMeasurements_; });
+  controller.controller().logger().addLogEntry("ExternalForceEstimator_useActiveJointsMask",
+                                               [&, this]() { return useActiveJointsMask_; });
 }
 
+void ExternalForcesEstimator::addDatastoreCall(mc_control::MCGlobalController & controller)
+{
+  controller.controller().datastore().make_call("EF_Estimator::isActive", [this]() { return isActive_; });
+  controller.controller().datastore().make_call("EF_Estimator::toggleActive", [this]() { isActive_ = !isActive_; });
+  controller.controller().datastore().make_call("EF_Estimator::setGain",
+                                         [this](double gain)
+                                         {
+                                           resetMomentumObserver();
+                                           residualGain_ = gain;
+                                         });
+  controller.controller().datastore().make_call("EF_Estimator::getGain", [this]() { return residualGain_; });
+  controller.controller().datastore().make_call("EF_Estimator::isUsingFTSensorMeasurements", [this]() { return useFTSensorMeasurements_; });
+  controller.controller().datastore().make_call("EF_Estimator::toggleFTSensorMeasurements", [this]() { useFTSensorMeasurements_ = !useFTSensorMeasurements_; });
+  controller.controller().datastore().make_call("EF_Estimator::isUsingActiveJointsMask", [this]() { return useActiveJointsMask_; });
+  controller.controller().datastore().make_call("EF_Estimator::toggleActiveJointsMask", [this]() { useActiveJointsMask_ = !useActiveJointsMask_; });
+}
 
 Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalController & controller)
 {
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
   auto & robot = ctl.robot();
   auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
-  int dofNumber = realRobot.mb().nrDof();
+  Eigen::VectorXd qdot = Eigen::VectorXd::Zero(nDof_);
+  Eigen::VectorXd tau = Eigen::VectorXd::Zero(nDof_);
 
-  Eigen::VectorXd qdot(dofNumber), tau(dofNumber);
-    
+  Eigen::VectorXd tau_src;
   switch(tau_mes_src_)
   {
     case TorqueSourceType::CommandedTorque:
       // Need friction model to finalize
-      tau = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
+      tau_src = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
       break;
     case TorqueSourceType::CurrentMeasurement:
       mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet");
@@ -288,9 +296,10 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
       //       * robot.mb().joint(robot.mb().nrJoints() - 1).gearRatio();
       break;
     case TorqueSourceType::JointTorqueMeasurement:
-      tau = Eigen::VectorXd::Map(realRobot.jointTorques().data(), realRobot.jointTorques().size());
-      break;
+      tau_src = Eigen::VectorXd::Map(realRobot.jointTorques().data(), realRobot.jointTorques().size());
+      break; 
   }
+  tau.head(tau_src.size()) = tau_src;
 
   rbd::ForwardDynamics fd = rbd::ForwardDynamics(realRobot.mb());
   fd.computeC(realRobot.mb(), realRobot.mbc());
@@ -304,7 +313,7 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
     M -= fd.HIr();
   }
 
-  qdot = rbd::dofToVector(realRobot.mb(), realRobot.alpha());
+  qdot = rbd::sDofToVector(realRobot.mb(), realRobot.alpha());
   Eigen::VectorXd pt = M * qdot; // Momentum at current time
 
   Eigen::MatrixXd C = coriolis.coriolis(realRobot.mb(), realRobot.mbc());
@@ -314,8 +323,8 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
   
   tau_ext_diff_ = forceSensorBasedEstimation(ctl);
   // tau_contact_ is updated in forceSensorBasedEstimation.
-  integralTerm_ += activeJoints_.cwiseProduct((tau + tau_ext_diff_ + tau_contact_ + C.transpose() * qdot - g + tau_momentum_observer_) * ctl.timestep());
-  tau_momentum_observer_ = activeJoints_.cwiseProduct(residualGain_ * (pt - integralTerm_ + pZero_));
+  integralTerm_ += (tau + tau_ext_diff_ + tau_contact_ + C.transpose() * qdot - g + tau_momentum_observer_) * ctl.timestep();
+  tau_momentum_observer_ = residualGain_ * (pt - integralTerm_ + pZero_);
 
   return  tau_ext_diff_ + tau_momentum_observer_;
 }
@@ -324,8 +333,8 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
 {
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
   auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
-  tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(realRobot.mb().nrDof());
-  if(!useFTSensorMeasurements_)
+  tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(nDof_);
+  if(useFTSensorMeasurements_)
   {
     for(const auto & ft_sensor : realRobot.forceSensors())
     {
@@ -338,7 +347,7 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
       // World-frame Jacobian (6 x path_dof), then expanded to full robot DoF
       // so J^T maps a world-frame wrench to all joint torques
       Eigen::MatrixXd shortJac = jac.jacobian(realRobot.mb(), realRobot.mbc());
-      Eigen::MatrixXd fullJac = Eigen::MatrixXd::Zero(6, realRobot.mb().nrDof());
+      Eigen::MatrixXd fullJac = Eigen::MatrixXd::Zero(6, nDof_);
       jac.fullJacobian(realRobot.mb(), shortJac, fullJac);
 
       // wrenchWithoutGravity returns the wrench in the sensor (body) frame.
@@ -355,7 +364,15 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
     }
   }
 
-  tau_contact_ = ctl.controller().dynamicsConstraint->dynamicFunction().contactTorque();
+  if(ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
+  {
+    tau_contact_ = Eigen::VectorXd::Zero(nDof_);
+  }
+  else
+  {
+    tau_contact_ = ctl.controller().dynamicsConstraint->dynamicFunction().contactTorque();
+  }
+
   return tau_ext_ft_sensor_ - tau_contact_;
 }
 
@@ -395,6 +412,67 @@ EstimationMethod ExternalForcesEstimator::toEstimationMethod(const std::string &
 
   mc_rtc::log::error_and_throw<std::runtime_error>(
       "[ExternalForceEstimator] Invalid estimation method: {}", s);
+}
+
+void ExternalForcesEstimator::initializeActiveJoints(const mc_rbdyn::Robot & robot)
+{
+
+  bool robotIsFloatingBase = (robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free);
+  
+  // Collect gripper joints to exclude from estimation
+  std::vector<std::string> activeGripperJoints;
+  for(const auto & g : robot.grippers())
+  {
+    for(const auto & n : g.get().activeJoints())
+    {
+      activeGripperJoints.push_back(n);
+    }
+  }
+  auto isActiveGripperJoint = [&](const std::string & jointName)
+  {
+    return std::find(activeGripperJoints.begin(), activeGripperJoints.end(), jointName)
+           != activeGripperJoints.end();
+  };
+
+  // Initialize mask to zero over the full DoF vector
+  activeJoints_ = Eigen::VectorXd::Zero(robot.mb().nrDof());
+
+  // Floating base: first 6 DoFs are always estimated
+  if(robotIsFloatingBase)
+  {
+    activeJoints_.head(6).setOnes();
+  }
+
+  // Walk the multibody joint list to stay in sync with the actual DoF vector
+  // layout. pos tracks the current position in the DoF vector.
+  // Joint 0 is either the floating base (Free, 6 DoF, already handled above)
+  // or the fixed root (0 DoF), so we start at joint index 1 in both cases.
+  int pos = robotIsFloatingBase ? 6 : 0;
+  for(int ji = 1; ji < robot.mb().nrJoints(); ++ji)
+  {
+    const auto & j = robot.mb().joint(ji);
+    if(j.dof() != 1)
+    {
+      // Multi-DoF or 0-DoF joints (fixed, mimic root) — advance pos and skip
+      pos += j.dof();
+      continue;
+    }
+
+    if(!j.isMimic() && !isActiveGripperJoint(j.name()))
+    {
+      activeJoints_(pos) = 1;
+      mc_rtc::log::info("[ExternalForcesEstimator][initializeActiveJoints] Estimated joint (pos {}) -> {}", pos, j.name());
+    }
+    else
+    {
+      mc_rtc::log::info("[ExternalForcesEstimator][initializeActiveJoints] Joint {} excluded from estimation.", j.name());
+    }
+
+    pos++;
+  }
+
+  mc_rtc::log::info("[ExternalForcesEstimator][initializeActiveJoints] Active DoFs: {}/{}",
+                    static_cast<int>(activeJoints_.sum()), robot.mb().nrDof());
 }
 
 } // namespace mc_plugin

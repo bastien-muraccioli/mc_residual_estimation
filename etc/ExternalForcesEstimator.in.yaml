@@ -1,4 +1,6 @@
 # Default
-residual_gain: 10
-torque_source_type: JointTorqueMeasurement
-estimation_method: MomentumObserver
+residual_gain: 10 # Higher is better, but lead to more noise in the estimation (recommended values are between 10 and dt/2)
+torque_source_type: CommandedTorque # Options: JointTorqueMeasurement, CommandedTorque, EstimatedTorque
+estimation_method: ForceSensorBased # Options: MomentumObserver, ForceSensorBased (MomentumObserver includes the use of the FT sensors)
+use_active_joints_mask: false # If true, the mimic and grippers related joints will be masked out in the estimation
+use_forces_from_ft_sensors: true # If true, the forces from the FT sensors will be used in the estimation
