@@ -18,18 +18,18 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
 {
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
 
-   if(ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
+  auto & robot = ctl.robot(ctl.robots()[0].name());
+  nDof_ = robot.mb().nrDof();
+
+  loadConfig(config);
+
+  if(useContactConstraintCompensation_ && ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
   {
     mc_rtc::log::warning(
     "[ExternalForcesEstimator] Contact-constraint torque compensation is only available with the TVM backend. " 
     "The current backend will ignore torques induced by contact constraints, "
     "which can lead to large errors in external force estimation when contacts are active.");
   }
-
-  auto & robot = ctl.robot(ctl.robots()[0].name());
-  nDof_ = robot.mb().nrDof();
-
-  loadConfig(config);
 
   if(useActiveJointsMask_)
   {
@@ -149,11 +149,13 @@ void ExternalForcesEstimator::loadConfig(const mc_rtc::Configuration & config)
   // estimation_method: ForceSensorBased # Options: MomentumObserver, ForceSensorBased (MomentumObserver includes the use of the FT sensors)
   // use_active_joints_mask: false # If true, the mimic and grippers related joints will be masked out in the estimation
   // use_forces_from_ft_sensors: true # If true, the forces from the FT sensors will be used in the estimation
+  // use_contact_constraint_compensation: false # If true, the torques induced by contact constraints will be subtracted from the torque source before computing the residual
   residualGain_ = config("residual_gain", 10.0);
   tau_mes_src_ = toTorqueSource(config("torque_source_type", std::string("CommandedTorque")));
   estimation_method_ = toEstimationMethod(config("estimation_method", std::string("ForceSensorBased")));
   useActiveJointsMask_ = config("use_active_joints_mask", false);
   useFTSensorMeasurements_ = config("use_forces_from_ft_sensors", true);
+  useContactConstraintCompensation_ = config("use_contact_constraint_compensation", false);
 }
 
 void ExternalForcesEstimator::resetMomentumObserver()
@@ -182,6 +184,7 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
     mc_rtc::gui::Checkbox("Is estimation feedback active", isActive_),
     mc_rtc::gui::Checkbox("Use sensor measurements", useFTSensorMeasurements_),
     mc_rtc::gui::Checkbox("Active Gripper & Mimic joints mask", useActiveJointsMask_),
+    mc_rtc::gui::Checkbox("Contact constraint compensation", useContactConstraintCompensation_),
     mc_rtc::gui::NumberInput(
       "Gain", 
       [this]() { return residualGain_; },
@@ -251,6 +254,8 @@ void ExternalForcesEstimator::addLog(mc_control::MCGlobalController & controller
                                                [&, this]() { return useFTSensorMeasurements_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_useActiveJointsMask",
                                                [&, this]() { return useActiveJointsMask_; });
+  controller.controller().logger().addLogEntry("ExternalForceEstimator_useContactConstraintCompensation",
+                                               [&, this]() { return useContactConstraintCompensation_; });
 }
 
 void ExternalForcesEstimator::addDatastoreCall(mc_control::MCGlobalController & controller)
@@ -268,6 +273,8 @@ void ExternalForcesEstimator::addDatastoreCall(mc_control::MCGlobalController & 
   controller.controller().datastore().make_call("EF_Estimator::toggleFTSensorMeasurements", [this]() { useFTSensorMeasurements_ = !useFTSensorMeasurements_; });
   controller.controller().datastore().make_call("EF_Estimator::isUsingActiveJointsMask", [this]() { return useActiveJointsMask_; });
   controller.controller().datastore().make_call("EF_Estimator::toggleActiveJointsMask", [this]() { useActiveJointsMask_ = !useActiveJointsMask_; });
+  controller.controller().datastore().make_call("EF_Estimator::isUsingContactConstraintCompensation", [this]() { return useContactConstraintCompensation_; });
+  controller.controller().datastore().make_call("EF_Estimator::toggleContactConstraintCompensation", [this]() { useContactConstraintCompensation_ = !useContactConstraintCompensation_; });
 }
 
 Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalController & controller)
@@ -364,7 +371,7 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
     }
   }
 
-  if(ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
+  if(!useContactConstraintCompensation_ || ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
   {
     tau_contact_ = Eigen::VectorXd::Zero(nDof_);
   }

@@ -100,18 +100,28 @@ namespace mc_plugin
  * detected; the term is set to zero in that case.
  *
  * ## Configuration keys (mc_rtc YAML)
- * | Key                  | Type   | Description                              |
- * |----------------------|--------|------------------------------------------|
- * | `residual_gain`      | double | Observer gain K (higher = faster, noisier)|
- * | `torque_source_type` | string | One of the TorqueSourceType names         |
- * | `estimation_method`  | string | One of the EstimationMethod names         |
+ * | Key                                   | Type   | Description                                                        |
+ * |---------------------------------------|--------|--------------------------------------------------------------------|
+ * | `residual_gain`                       | double | Observer gain K (higher = faster, noisier)                         |
+ * | `torque_source_type`                  | string | One of the TorqueSourceType names                                  |
+ * | `estimation_method`                   | string | One of the EstimationMethod names                                  |
+ * | `use_active_joints_mask`              | bool   | Whether to mask out gripper/mimic joints in the feedback           |
+ * | `use_forces_from_ft_sensors`          | bool   | Whether to fuse force sensor measurements into the observer        |
+ * | `use_contact_constraint_compensation` | bool   | Whether to subtract contact-constraint torques from the estimation |
  *
  * ## Datastore interface
- * | Key                        | Type   | Description                       |
- * |----------------------------|--------|-----------------------------------|
- * | `EF_Estimator::isActive`   | bool   | Whether feedback is applied        |
- * | `EF_Estimator::toggleActive` | void | Toggle feedback on/off             |
- * | `EF_Estimator::setGain`    | double | Set gain and reset observer state  |
+ * | Key                                                  | Type   | Description                                                      |
+ * |------------------------------------------------------|--------|------------------------------------------------------------------|
+ * | `EF_Estimator::isActive`                             | bool   | Whether feedback is applied                                      |
+ * | `EF_Estimator::toggleActive`                         | void   | Toggle feedback on/off                                           |
+ * | `EF_Estimator::setGain`                              | void   | Set gain and reset observer state                                |
+ * | `EF_Estimator::getGain`                              | double | Get current gain value                                           |
+ * | `EF_Estimator::isUsingFTSensorMeasurements`          | bool   | Whether force sensor measurements are fused into the observer    |
+ * | `EF_Estimator::toggleFTSensorMeasurements`           | void   | Toggle fusion of force sensor measurements into the observer     |
+ * | `EF_Estimator::isUsingActiveJointsMask`              | bool   | Whether the active-joint mask is applied to the output           |
+ * | `EF_Estimator::toggleActiveJointsMask`               | void   | Toggle the application of the active-joint mask to the output    |
+ * | `EF_Estimator::isUsingContactConstraintCompensation` | bool   | Whether contact-constraint torque compensation is applied        |
+ * | `EF_Estimator::toggleContactConstraintCompensation`  | void   | Toggle the application of contact-constraint torque compensation |
  */
 struct ExternalForcesEstimator : public mc_control::GlobalPlugin
 {
@@ -225,6 +235,7 @@ private:
   bool useFTSensorMeasurements_ = true;  ///< Whether to use force sensor data.
   bool useActiveJointsMask_ = false;     /// If true, gripper and mimic joint torques are zeroed in the output.
   bool activeJointsInitialized_ = false;
+  bool useContactConstraintCompensation_ = false; ///< Whether to subtract contact-constraint torques.
 
   // ── Observer state ──────────────────────────────────────────────────────────
 
