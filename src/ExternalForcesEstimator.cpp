@@ -23,14 +23,6 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
 
   loadConfig(config);
 
-  if(useContactConstraintCompensation_ && ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
-  {
-    mc_rtc::log::warning(
-    "[ExternalForcesEstimator] Contact-constraint torque compensation is only available with the TVM backend. " 
-    "The current backend will ignore torques induced by contact constraints, "
-    "which can lead to large errors in external force estimation when contacts are active.");
-  }
-
   if(useActiveJointsMask_)
   {
     initializeActiveJoints(robot);
@@ -56,8 +48,6 @@ void ExternalForcesEstimator::init(mc_control::MCGlobalController & controller, 
 
   tau_ext_hat_ = Eigen::VectorXd::Zero(nDof_);
   tau_momentum_observer_ = Eigen::VectorXd::Zero(nDof_);
-  tau_ext_diff_ = Eigen::VectorXd::Zero(nDof_);
-  tau_contact_ = Eigen::VectorXd::Zero(nDof_);
   tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(nDof_);
   integralTerm_ = Eigen::VectorXd::Zero(nDof_);
 
@@ -155,6 +145,8 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
   Eigen::VectorXd qdot = Eigen::VectorXd::Zero(nDof_);
   Eigen::VectorXd tau = Eigen::VectorXd::Zero(nDof_);
 
+  bool robotIsFloatingBase = (robot.mb().nrJoints() > 0 && robot.mb().joint(0).type() == rbd::Joint::Free);
+
   Eigen::VectorXd tau_src;
   switch(tau_mes_src_)
   {
@@ -163,20 +155,31 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
       tau_src = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
       break;
     case TorqueSourceType::CurrentMeasurement:
-      mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet");
+      mc_rtc::log::warning("[ExternalForcesEstimator] Not implemented yet, switching to CommandedTorque source.");
       // Need current to torque conversion, which requires motor constants and friction model
+      tau_mes_src_ = TorqueSourceType::CommandedTorque;
+      tau_src = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
       break;
     case TorqueSourceType::MotorTorqueMeasurement:
-      mc_rtc::log::error_and_throw<std::runtime_error>("Not implemented yet");
+      mc_rtc::log::warning("[ExternalForcesEstimator] Not implemented yet, switching to CommandedTorque source.");
       // Need friction model to finalize + gear ratio for motor torque 
       // tau = Eigen::VectorXd::Map(realRobot.jointTorques().data(), realRobot.jointTorques().size())
       //       * robot.mb().joint(robot.mb().nrJoints() - 1).gearRatio();
+      tau_mes_src_ = TorqueSourceType::CommandedTorque;
+      tau_src = Eigen::VectorXd::Map(robot.jointTorques().data(), robot.jointTorques().size());
       break;
     case TorqueSourceType::JointTorqueMeasurement:
       tau_src = Eigen::VectorXd::Map(realRobot.jointTorques().data(), realRobot.jointTorques().size());
       break; 
   }
-  tau.head(tau_src.size()) = tau_src;
+  if(robotIsFloatingBase)
+  {
+    tau.segment(6, tau_src.size()) = tau_src;
+  }
+  else
+  {
+    tau.head(tau_src.size()) = tau_src;
+  }
 
   rbd::ForwardDynamics fd = rbd::ForwardDynamics(realRobot.mb());
   fd.computeC(realRobot.mb(), realRobot.mbc());
@@ -197,13 +200,12 @@ Eigen::VectorXd ExternalForcesEstimator::momentumObserver(mc_control::MCGlobalCo
   Eigen::VectorXd Cqdot_plus_g = fd.C();
   Eigen::VectorXd g = -(C*qdot - Cqdot_plus_g);
 
+  forceSensorBasedEstimation(ctl);
   
-  tau_ext_diff_ = forceSensorBasedEstimation(ctl);
-  // tau_contact_ is updated in forceSensorBasedEstimation.
-  integralTerm_ += (tau + tau_ext_diff_ + tau_contact_ + C.transpose() * qdot - g + tau_momentum_observer_) * ctl.timestep();
+  integralTerm_ += (tau + tau_ext_ft_sensor_ + C.transpose() * qdot - g + tau_momentum_observer_) * ctl.timestep();
   tau_momentum_observer_ = residualGain_ * (pt - integralTerm_ + pZero_);
 
-  return  tau_ext_diff_ + tau_momentum_observer_;
+  return  tau_ext_ft_sensor_ + tau_momentum_observer_;
 }
 
 Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::MCGlobalController & controller)
@@ -211,6 +213,15 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
   auto & ctl = static_cast<mc_control::MCGlobalController &>(controller);
   auto & realRobot = ctl.realRobot(ctl.robots()[0].name());
   tau_ext_ft_sensor_ = Eigen::VectorXd::Zero(nDof_);
+
+  const auto & forceSensors = realRobot.forceSensors();
+  // Check if the list is empty, which can happen if the robot model doesn't include any force sensors or if there's an issue with loading them
+  if(forceSensors.empty())
+  {
+    if(useFTSensorMeasurements_) mc_rtc::log::warning("[ExternalForcesEstimator] No force sensors found in the robot model, force sensor based estimation will return zero.");
+    return tau_ext_ft_sensor_;
+  }
+
   if(useFTSensorMeasurements_)
   {
     for(const auto & ft_sensor : realRobot.forceSensors())
@@ -240,17 +251,7 @@ Eigen::VectorXd ExternalForcesEstimator::forceSensorBasedEstimation(mc_control::
       tau_ext_ft_sensor_ += fullJac.transpose() * w.vector();
     }
   }
-
-  if(!useContactConstraintCompensation_ || ctl.controller().dynamicsConstraint->backend() != mc_solver::QPSolver::Backend::TVM)
-  {
-    tau_contact_ = Eigen::VectorXd::Zero(nDof_);
-  }
-  else
-  {
-    tau_contact_ = ctl.controller().dynamicsConstraint->dynamicFunction().contactTorque();
-  }
-
-  return tau_ext_ft_sensor_ - tau_contact_;
+  return tau_ext_ft_sensor_;
 }
 
 void ExternalForcesEstimator::initializeActiveJoints(const mc_rbdyn::Robot & robot)
@@ -322,13 +323,11 @@ void ExternalForcesEstimator::loadConfig(const mc_rtc::Configuration & config)
   // estimation_method: ForceSensorBased # Options: MomentumObserver, ForceSensorBased (MomentumObserver includes the use of the FT sensors)
   // use_active_joints_mask: false # If true, the mimic and grippers related joints will be masked out in the estimation
   // use_forces_from_ft_sensors: true # If true, the forces from the FT sensors will be used in the estimation
-  // use_contact_constraint_compensation: false # If true, the torques induced by contact constraints will be subtracted from the torque source before computing the residual
   residualGain_ = config("residual_gain", 10.0);
   tau_mes_src_ = toTorqueSource(config("torque_source_type", std::string("CommandedTorque")));
   estimation_method_ = toEstimationMethod(config("estimation_method", std::string("ForceSensorBased")));
   useActiveJointsMask_ = config("use_active_joints_mask", false);
   useFTSensorMeasurements_ = config("use_forces_from_ft_sensors", true);
-  useContactConstraintCompensation_ = config("use_contact_constraint_compensation", false);
 }
 
 void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller)
@@ -351,7 +350,6 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
     mc_rtc::gui::Checkbox("Is estimation feedback active", isActive_),
     mc_rtc::gui::Checkbox("Use sensor measurements", useFTSensorMeasurements_),
     mc_rtc::gui::Checkbox("Active Gripper & Mimic joints mask", useActiveJointsMask_),
-    mc_rtc::gui::Checkbox("Contact constraint compensation", useContactConstraintCompensation_),
     mc_rtc::gui::NumberInput(
       "Gain", 
       [this]() { return residualGain_; },
@@ -374,6 +372,7 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
       },
       [this](const std::string & v)
       {
+        resetMomentumObserver();
         estimation_method_ = toEstimationMethod(v);
       }),
 
@@ -388,12 +387,12 @@ void ExternalForcesEstimator::addGui(mc_control::MCGlobalController & controller
       },
       [this](const std::string & v)
       {
+        resetMomentumObserver();
         tau_mes_src_ = toTorqueSource(v);
       }),
     mc_rtc::gui::ArrayLabel("Torque Ext Estimated", jointNames, [this]() { return tau_ext_hat_; }),
     mc_rtc::gui::ArrayLabel("Torque Ext from Momentum Observer", jointNames, [this]() { return tau_momentum_observer_; }),
-    mc_rtc::gui::ArrayLabel("Torque Ext from Force Sensors", jointNames, [this]() { return tau_ext_ft_sensor_; }),
-    mc_rtc::gui::ArrayLabel("Torque Ext from Contact Constraint", jointNames, [this]() { return tau_contact_; })
+    mc_rtc::gui::ArrayLabel("Torque Ext from Force Sensors", jointNames, [this]() { return tau_ext_ft_sensor_; })
   );
 }
 
@@ -411,18 +410,12 @@ void ExternalForcesEstimator::addLog(mc_control::MCGlobalController & controller
                                                [&, this]() { return activeJoints_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauMomentumObserver",
                                                [&, this]() { return tau_momentum_observer_; });
-  controller.controller().logger().addLogEntry("ExternalForceEstimator_tauExtDiff",
-                                               [&, this]() { return tau_ext_diff_; });
-  controller.controller().logger().addLogEntry("ExternalForceEstimator_tauContact",
-                                               [&, this]() { return tau_contact_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_tauExtFtSensor",
                                                [&, this]() { return tau_ext_ft_sensor_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_useFTSensorMeasurements",
                                                [&, this]() { return useFTSensorMeasurements_; });
   controller.controller().logger().addLogEntry("ExternalForceEstimator_useActiveJointsMask",
                                                [&, this]() { return useActiveJointsMask_; });
-  controller.controller().logger().addLogEntry("ExternalForceEstimator_useContactConstraintCompensation",
-                                               [&, this]() { return useContactConstraintCompensation_; });
 }
 
 void ExternalForcesEstimator::addDatastoreCall(mc_control::MCGlobalController & controller)
@@ -440,8 +433,6 @@ void ExternalForcesEstimator::addDatastoreCall(mc_control::MCGlobalController & 
   controller.controller().datastore().make_call("EF_Estimator::toggleFTSensorMeasurements", [this]() { useFTSensorMeasurements_ = !useFTSensorMeasurements_; });
   controller.controller().datastore().make_call("EF_Estimator::isUsingActiveJointsMask", [this]() { return useActiveJointsMask_; });
   controller.controller().datastore().make_call("EF_Estimator::toggleActiveJointsMask", [this]() { useActiveJointsMask_ = !useActiveJointsMask_; });
-  controller.controller().datastore().make_call("EF_Estimator::isUsingContactConstraintCompensation", [this]() { return useContactConstraintCompensation_; });
-  controller.controller().datastore().make_call("EF_Estimator::toggleContactConstraintCompensation", [this]() { useContactConstraintCompensation_ = !useContactConstraintCompensation_; });
 }
 
 std::string ExternalForcesEstimator::toString(TorqueSourceType src)
